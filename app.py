@@ -145,7 +145,72 @@ with tabs[0]:
         )
 
     bins = [-100, -9, -7, -5, -3, -1, 0, 1, 3, 5, 7, 9, 11, 100]
-    labels = ["≤-9%", "-9\~-7%", "-7\~-5%", "-5\~-3%", "-3\~-1%", "-1\~0%",
-              "0\~1%", "1\~3%", "3\~5%", "5\~7%", "7\~9%", "9\~11%", ">11%"]
+    labels = ["≤-9%", "-9~-7%", "-7~-5%", "-5~-3%", "-3~-1%", "-1~0%",
+              "0~1%", "1~3%", "3~5%", "5~7%", "7~9%", "9~11%", ">11%"]
     dist = pd.cut(spot["涨跌幅"], bins=bins, labels=labels, right=False).value_counts(sort=False)
-    st.markdown("#### 市场涨
+    st.markdown("#### 市场涨跌分布")
+    st.bar_chart(dist)
+
+with tabs[1]:
+    st.markdown(f"#### {strategy}｜基础候选")
+    filt = spot[
+        (spot["涨跌幅"] >= min_pct) &
+        (spot["成交额"] >= min_amount * 10000)
+    ].copy()
+
+    if "量比" in filt.columns and strategy != "中线趋势观察":
+        filt = filt[filt["量比"].isna() | (filt["量比"] >= 1.0)]
+
+    filt["筛选说明"] = {
+        "超短线观察": "当日涨幅、成交额、量比初筛；未结合连板和板块情绪",
+        "短波段观察": "当日强势和成交活跃初筛；需继续验证20/60日平台与回踩",
+        "中线趋势观察": "仅为流动性和当日强度初筛；未纳入财务质量和估值"
+    }[strategy]
+
+    cols = [x for x in ["代码", "名称", "最新价", "涨跌幅", "成交额", "换手率", "量比", "筛选说明"] if x in filt.columns]
+    st.write(f"符合基础条件：**{len(filt):,}** 只")
+    st.dataframe(
+        filt.sort_values(["涨跌幅", "成交额"], ascending=False)[cols].head(300),
+        use_container_width=True,
+        hide_index=True
+    )
+    st.download_button(
+        "下载候选名单 CSV",
+        filt[cols].to_csv(index=False).encode("utf-8-sig"),
+        "a_share_candidates.csv",
+        "text/csv"
+    )
+    st.caption("这只是当日行情初筛，不是经过历史验证的交易策略。")
+
+with tabs[2]:
+    opts = spot[["代码", "名称"]].drop_duplicates().sort_values("代码")
+    selected = st.selectbox(
+        "选择股票",
+        opts.apply(lambda r: f"{r['代码']}｜{r['名称']}", axis=1).tolist()
+    )
+    code = selected.split("｜")[0]
+    adj = st.selectbox("复权方式", ["前复权", "不复权", "后复权"])
+    adjmap = {"前复权": "qfq", "不复权": "", "后复权": "hfq"}
+
+    if st.button("获取近一年日线", type="primary"):
+        end = datetime.now().strftime("%Y%m%d")
+        start = (pd.Timestamp.today() - pd.Timedelta(days=400)).strftime("%Y%m%d")
+        try:
+            with st.spinner("获取历史日线中……"):
+                hist = get_hist(code, start, end, adjmap[adj])
+            if hist is None or hist.empty:
+                st.warning("历史行情为空。")
+            else:
+                for col in ["收盘", "开盘", "最高", "最低", "成交量", "成交额"]:
+                    if col in hist.columns:
+                        hist[col] = pd.to_numeric(hist[col], errors="coerce")
+                hist["MA20"] = hist["收盘"].rolling(20).mean()
+                hist["MA60"] = hist["收盘"].rolling(60).mean()
+                st.line_chart(hist.set_index("日期")[["收盘", "MA20", "MA60"]].tail(250))
+                st.dataframe(hist.tail(30), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error("历史日线获取失败")
+            st.code(f"{type(e).__name__}: {str(e)[:800]}")
+
+st.divider()
+st.caption("A股猎手 Quant 1.1｜第三方公开行情连接测试版，不构成投资建议。")
