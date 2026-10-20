@@ -1,124 +1,123 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
-from datetime import date
+from datetime import datetime
 
-st.set_page_config(page_title="A股猎手 Quant 1.0", page_icon="📈", layout="wide")
+st.set_page_config(page_title="A股猎手 Quant 1.1", page_icon="📈", layout="wide")
+st.title("📈 A股猎手 Quant 1.1")
+st.caption("日线研究原型｜真实数据连接测试版｜不提供自动交易")
+st.warning("第三方行情可能延迟、缺失或临时不可用。本版先验证行情连接和基础筛选，尚未完成完整历史回测。")
 
-st.title("📈 A股猎手 Quant 1.0")
-st.caption("个人研究工具 · 日线版原型 | 当前未连接真实行情，不构成投资建议")
+@st.cache_data(ttl=900, show_spinner=False)
+def get_spot():
+    import akshare as ak
+    df = ak.stock_zh_a_spot_em()
+    if df is None or df.empty:
+        raise RuntimeError("行情接口返回空数据")
+    return df
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_hist(code, start_date, end_date, adjust):
+    import akshare as ak
+    return ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust=adjust)
 
 with st.sidebar:
-    st.header("系统设置")
-    mode = st.radio("数据模式", ["原型演示（模拟数据）", "真实数据（尚未配置）"])
-    st.info("演示模式中的股票、价格、涨跌幅均为模拟数据，不可用于真实交易决策。")
-    st.divider()
-    st.subheader("策略类型")
-    strategy = st.selectbox("选择策略", ["超短线（1–5日）", "短波段（5–20日）", "中线趋势（20–60日）"])
-    min_score = st.slider("最低综合评分", 0, 100, 60)
-    st.caption("后续接入真实行情后，这些参数将用于全市场筛选。")
+    st.header("研究设置")
+    strategy = st.selectbox("策略方向", ["超短线观察", "短波段观察", "中线趋势观察"])
+    min_pct = st.slider("最低当日涨幅（%）", -10.0, 10.0, 2.0, 0.5)
+    min_amount = st.number_input("最低成交额（万元）", min_value=0, value=10000, step=5000)
+    if st.button("清除缓存并刷新"):
+        st.cache_data.clear()
+        st.rerun()
 
-if mode == "真实数据（尚未配置）":
-    st.warning("真实行情接口尚未配置。为避免误导，当前不展示任何实时或真实市场数据。")
-    st.markdown("""
-    ### 下一步需要完成
-    1. 选择并验证日线行情数据源；
-    2. 配置数据接口与缓存；
-    3. 加入A股代码列表、停复牌与涨跌停处理；
-    4. 完成无未来函数的回测。
-    """)
+st.subheader("一、真实行情连接")
+try:
+    with st.spinner("正在尝试获取A股行情……"):
+        spot = get_spot()
+    st.success(f"行情接口连接成功：获取到 {len(spot):,} 条行情记录。")
+    st.caption("获取时间：" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "（服务器时间；行情本身可能延迟）")
+except Exception as e:
+    st.error("暂时无法获取真实行情，系统不会用模拟数据替代。")
+    st.write("可能原因：第三方接口限流、网络不可达、接口变更或部署环境问题。")
+    st.code(f"{type(e).__name__}: {str(e)[:600]}")
     st.stop()
 
-# Clearly synthetic sample data for UI prototyping only.
-rng = np.random.default_rng(42)
-names = ["示例科技A", "示例设备B", "示例软件C", "示例材料D", "示例通信E",
-         "示例医药F", "示例消费G", "示例电力H", "示例制造I", "示例云计算J",
-         "示例电子K", "示例传媒L", "示例机械M", "示例汽车N", "示例化工O"]
-codes = [f"SIM{i:03d}" for i in range(1, len(names)+1)]
-returns = rng.normal(1.0, 3.2, len(names)).round(2)
-vol_ratio = rng.uniform(0.7, 2.6, len(names)).round(2)
-rs20 = rng.uniform(-8, 18, len(names)).round(2)
-trend = rng.integers(35, 96, len(names))
-scores = np.clip(0.35 * (returns + 5) * 5 + 0.25 * vol_ratio * 20 + 0.2 * (rs20 + 8) * 3 + 0.2 * trend, 0, 100).round(1)
+need = ["代码", "名称", "最新价", "涨跌幅", "成交额"]
+missing = [c for c in need if c not in spot.columns]
+if missing:
+    st.error(f"接口字段不符合预期，缺少：{missing}")
+    st.write("实际字段：", list(spot.columns))
+    st.stop()
+for c in ["最新价", "涨跌幅", "成交额", "换手率", "量比", "振幅"]:
+    if c in spot.columns:
+        spot[c] = pd.to_numeric(spot[c], errors="coerce")
+spot["代码"] = spot["代码"].astype(str).str.zfill(6)
+spot = spot[spot["代码"].str.match(r"^(60|68|00|30|83|87|43)")].copy()
+up = int((spot["涨跌幅"] > 0).sum())
+down = int((spot["涨跌幅"] < 0).sum())
+flat = int((spot["涨跌幅"] == 0).sum())
+amount_yi = spot["成交额"].sum(skipna=True) / 1e8
+a,b,c,d = st.columns(4)
+a.metric("纳入统计证券", f"{len(spot):,}")
+b.metric("上涨 / 下跌", f"{up:,} / {down:,}")
+c.metric("平盘", f"{flat:,}")
+d.metric("样本成交额合计", f"{amount_yi:.0f}亿元")
 
-df = pd.DataFrame({
-    "代码（模拟）": codes,
-    "名称（模拟）": names,
-    "当日涨跌幅%（模拟）": returns,
-    "量比（模拟）": vol_ratio,
-    "20日相对强度（模拟）": rs20,
-    "趋势分（模拟）": trend,
-    "综合评分（演示）": scores
-}).sort_values("综合评分（演示）", ascending=False)
+tabs = st.tabs(["市场概览", "策略候选", "个股日线分析"])
+with tabs[0]:
+    cols = [x for x in ["代码","名称","最新价","涨跌幅","成交额","换手率","量比"] if x in spot.columns]
+    left,right = st.columns(2)
+    with left:
+        st.markdown("#### 涨幅前20")
+        st.dataframe(spot.sort_values("涨跌幅",ascending=False)[cols].head(20), use_container_width=True, hide_index=True)
+    with right:
+        st.markdown("#### 成交额前20")
+        st.dataframe(spot.sort_values("成交额",ascending=False)[cols].head(20), use_container_width=True, hide_index=True)
+    bins=[-100,-9,-7,-5,-3,-1,0,1,3,5,7,9,11,100]
+    labels=["≤-9%","-9~-7%","-7~-5%","-5~-3%","-3~-1%","-1~0%","0~1%","1~3%","3~5%","5~7%","7~9%","9~11%",">11%"]
+    dist=pd.cut(spot["涨跌幅"],bins=bins,labels=labels,right=False).value_counts(sort=False)
+    st.markdown("#### 市场涨跌分布")
+    st.bar_chart(dist)
 
-# Header metrics
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("数据状态", "演示数据")
-c2.metric("策略", strategy)
-c3.metric("候选样本", len(df))
-c4.metric("评分门槛", f"{min_score}/100")
+with tabs[1]:
+    st.markdown(f"#### {strategy}｜基础候选")
+    filt=spot[(spot["涨跌幅"]>=min_pct)&(spot["成交额"]>=min_amount*10000)].copy()
+    if "量比" in filt.columns and strategy != "中线趋势观察":
+        filt=filt[filt["量比"].isna() | (filt["量比"]>=1.0)]
+    filt["筛选说明"] = {
+        "超短线观察":"当日涨幅、成交额、量比初筛；未结合连板和板块情绪",
+        "短波段观察":"当日强势和成交活跃初筛；需继续验证20/60日平台与回踩",
+        "中线趋势观察":"仅为流动性和当日强度初筛；未纳入财务质量和估值"
+    }[strategy]
+    cols=[x for x in ["代码","名称","最新价","涨跌幅","成交额","换手率","量比","筛选说明"] if x in filt.columns]
+    st.write(f"符合基础条件：**{len(filt):,}** 只")
+    st.dataframe(filt.sort_values(["涨跌幅","成交额"],ascending=False)[cols].head(300),use_container_width=True,hide_index=True)
+    st.download_button("下载候选名单 CSV",filt[cols].to_csv(index=False).encode("utf-8-sig"),"a_share_candidates.csv","text/csv")
+    st.caption("这只是当日行情初筛，不是经过历史验证的交易策略。")
 
-st.warning("以下全部为界面演示用模拟数据，股票名称与代码不是实际证券，不可据此买卖。")
-
-tab1, tab2, tab3, tab4 = st.tabs(["市场总览", "策略选股", "个股分析", "回测与风险"])
-
-with tab1:
-    st.subheader("市场状态面板（演示）")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("市场广度", "示例 56%", help="模拟值")
-    m2.metric("强势样本占比", "示例 18%", help="模拟值")
-    m3.metric("成交额变化", "示例 +7.2%", help="模拟值")
-    m4.metric("风险状态", "待真实数据验证")
-    chart_df = df.sort_values("当日涨跌幅%（模拟）")
-    fig = px.bar(chart_df, x="名称（模拟）", y="当日涨跌幅%（模拟）", title="样本涨跌幅（模拟）")
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption("真实版本会加入指数趋势、涨跌家数、成交额、涨停/跌停与行业轮动等指标（视数据源覆盖情况而定）。")
-
-with tab2:
-    st.subheader("策略候选池（演示）")
-    filtered = df[df["综合评分（演示）"] >= min_score]
-    st.dataframe(filtered, use_container_width=True, hide_index=True)
-    st.download_button("下载当前演示表 CSV", filtered.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="demo_screening.csv", mime="text/csv")
-    st.markdown("**后续规则方向**")
-    if strategy.startswith("超短线"):
-        st.write("- 1/3/5日动量、成交额变化、量价配合、市场情绪与板块强度。")
-    elif strategy.startswith("短波段"):
-        st.write("- 20/60日趋势、平台突破、放量突破、缩量回踩、行业相对强度。")
-    else:
-        st.write("- 营收/利润/现金流、估值区间、趋势结构、行业景气与催化因素。")
-
-with tab3:
-    st.subheader("个股研究卡（演示）")
-    chosen = st.selectbox("选择一个模拟样本", df["名称（模拟）"].tolist())
-    row = df[df["名称（模拟）"] == chosen].iloc[0]
-    a, b, c = st.columns(3)
-    a.metric("综合评分", f"{row['综合评分（演示）']}/100")
-    b.metric("当日涨跌幅", f"{row['当日涨跌幅%（模拟）']}%")
-    c.metric("量比", f"{row['量比（模拟）']}x")
-    st.markdown("#### 入选理由（示例规则）")
-    reasons = []
-    if row["当日涨跌幅%（模拟）"] > 2: reasons.append("当日动量较强（模拟）")
-    if row["量比（模拟）"] > 1.5: reasons.append("成交活跃度较高（模拟）")
-    if row["20日相对强度（模拟）"] > 5: reasons.append("20日相对强度较高（模拟）")
-    if row["趋势分（模拟）"] > 70: reasons.append("趋势评分较高（模拟）")
-    st.write("；".join(reasons) if reasons else "当前样本未触发明显强势条件（模拟）")
-    st.markdown("#### 失效条件（正式版将量化）")
-    st.write("- 突破失败且放量下跌；- 行业强度转弱；- 跌破策略定义的趋势/止损条件。")
-    st.caption("这只是演示卡片。正式版将显示真实行情、关键价位、基本面披露日期及数据来源。")
-
-with tab4:
-    st.subheader("回测模块（尚未接入）")
-    st.info("当前不生成虚构回测收益。正式版将先定义买入/卖出规则，再纳入交易费用、滑点、涨跌停无法成交、停牌和财报披露时点。")
-    st.markdown("""
-    **计划输出**
-    - 总收益与年化收益
-    - 最大回撤、波动率、夏普比率
-    - 胜率、盈亏比、平均持仓天数
-    - 与沪深300等基准比较
-    - 分年份、分行情环境与分行业表现
-    """)
+with tabs[2]:
+    opts=spot[["代码","名称"]].drop_duplicates().sort_values("代码")
+    selected=st.selectbox("选择股票",opts.apply(lambda r:f"{r['代码']}｜{r['名称']}",axis=1).tolist())
+    code=selected.split("｜")[0]
+    adj=st.selectbox("复权方式",["前复权","不复权","后复权"])
+    adjmap={"前复权":"qfq","不复权":"","后复权":"hfq"}
+    if st.button("获取近一年日线",type="primary"):
+        end=datetime.now().strftime("%Y%m%d")
+        start=(pd.Timestamp.today()-pd.Timedelta(days=400)).strftime("%Y%m%d")
+        try:
+            with st.spinner("获取历史日线中……"):
+                hist=get_hist(code,start,end,adjmap[adj])
+            if hist is None or hist.empty:
+                st.warning("历史行情为空。")
+            else:
+                for col in ["收盘","开盘","最高","最低","成交量","成交额"]:
+                    if col in hist.columns: hist[col]=pd.to_numeric(hist[col],errors="coerce")
+                hist["MA20"]=hist["收盘"].rolling(20).mean()
+                hist["MA60"]=hist["收盘"].rolling(60).mean()
+                st.line_chart(hist.set_index("日期")[["收盘","MA20","MA60"]].tail(250))
+                st.dataframe(hist.tail(30),use_container_width=True,hide_index=True)
+        except Exception as e:
+            st.error("历史日线获取失败")
+            st.code(f"{type(e).__name__}: {str(e)[:600]}")
 
 st.divider()
-st.caption(f"原型版本 · 页面生成日期：{date.today().isoformat()} · 下一阶段：接入并验证真实日线数据。")
+st.caption("A股猎手 Quant 1.1｜第三方公开行情连接测试版，不构成投资建议。")
